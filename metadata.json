@@ -1,0 +1,6 @@
+{
+  "name": "DokuScan — Pemindai Dokumen PWA",
+  "description": "Aplikasi pemindai dokumen Android-First PWA dengan koreksi perspektif, filter dokumen, multi-halaman, ekspor PDF, dan OCR lokal tanpa cloud.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

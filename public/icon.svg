@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <rect width="100" height="100" rx="20" fill="#0B192C"/>
+  <rect x="25" y="18" width="50" height="64" rx="6" fill="#F1F5F9"/>
+  <!-- Scanner corners -->
+  <path d="M 20 30 L 20 18 L 32 18" stroke="#38BDF8" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M 80 30 L 80 18 L 68 18" stroke="#38BDF8" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M 20 70 L 20 82 L 32 82" stroke="#38BDF8" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <path d="M 80 70 L 80 82 L 68 82" stroke="#38BDF8" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <!-- Lines -->
+  <rect x="34" y="30" width="32" height="4" rx="2" fill="#008DDA"/>
+  <rect x="34" y="40" width="32" height="3" rx="1.5" fill="#94A3B8"/>
+  <rect x="34" y="48" width="22" height="3" rx="1.5" fill="#94A3B8"/>
+  <!-- Scanner beam -->
+  <line x1="26" y1="58" x2="74" y2="58" stroke="#38BDF8" stroke-width="3" stroke-linecap="round"/>
+  <!-- Camera lens badge -->
+  <circle cx="58" cy="68" r="9" fill="#0F172A"/>
+  <circle cx="58" cy="68" r="6" fill="#008DDA"/>
+  <circle cx="58" cy="68" r="3" fill="#FFFFFF"/>
+</svg>

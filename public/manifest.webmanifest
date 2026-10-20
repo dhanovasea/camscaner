@@ -1,0 +1,43 @@
+{
+  "id": "/",
+  "name": "DokuScan — Pemindai Dokumen PWA",
+  "short_name": "DokuScan",
+  "description": "Aplikasi pemindai dokumen Android-First PWA mirip CamScanner dengan koreksi perspektif dan OCR lokal.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0B192C",
+  "theme_color": "#0B192C",
+  "lang": "id",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "categories": ["productivity", "utilities"],
+  "shortcuts": [
+    {
+      "name": "Scan Dokumen Baru",
+      "short_name": "Scan",
+      "description": "Buka kamera untuk memindai dokumen",
+      "url": "/?action=scan",
+      "icons": [{ "src": "/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}
