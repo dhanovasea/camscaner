@@ -1,14 +1,19 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { DocumentCorners, Point } from '../types';
 import { warpPerspective, detectDocumentCorners } from '../services/perspective';
-import { Check, X, RotateCcw, Maximize2, Wand2, RotateCw } from 'lucide-react';
+import { Check, X, RotateCcw, Maximize2, Wand2, RotateCw, Move } from 'lucide-react';
 
 interface Props {
   imageBlob: Blob;
   initialCorners?: DocumentCorners;
-  onDone: (warpedBlob: Blob, corners: DocumentCorners) => void;
+  onDone: (warpedBlob: Blob, corners: DocumentCorners, updatedOriginalBlob?: Blob) => void;
   onCancel: () => void;
 }
+
+type DragTarget =
+  | { type: 'corner'; key: keyof DocumentCorners }
+  | { type: 'edge'; key: 'top' | 'bottom' | 'left' | 'right' }
+  | null;
 
 export const CropModal: React.FC<Props> = ({
   imageBlob,
@@ -18,16 +23,20 @@ export const CropModal: React.FC<Props> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const loupeCanvasRef = useRef<HTMLCanvasElement>(null);
+
   const [imgElement, setImgElement] = useState<HTMLImageElement | null>(null);
-  const [rotation, setRotation] = useState(0);
+  const [currentOriginalBlob, setCurrentOriginalBlob] = useState<Blob>(imageBlob);
   const [corners, setCorners] = useState<DocumentCorners>({
     tl: { x: 0, y: 0 },
     tr: { x: 0, y: 0 },
     br: { x: 0, y: 0 },
     bl: { x: 0, y: 0 },
   });
-  const [activeCorner, setActiveCorner] = useState<keyof DocumentCorners | null>(null);
-  const [touchPos, setTouchPos] = useState<Point | null>(null);
+  const [dragTarget, setDragTarget] = useState<DragTarget>(null);
+  const [dragStartPoint, setDragStartPoint] = useState<Point | null>(null);
+  const [initialDragCorners, setInitialDragCorners] = useState<DocumentCorners | null>(null);
+  const [touchScreenPos, setTouchScreenPos] = useState<Point | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
   // Load image
@@ -41,8 +50,8 @@ export const CropModal: React.FC<Props> = ({
       if (initialCorners) {
         setCorners(initialCorners);
       } else {
-        // Automatic initial detection
-        const detected = detectDocumentCorners(img.width, img.height);
+        // Run real computer vision document corner detection
+        const detected = detectDocumentCorners(img);
         setCorners(detected);
       }
     };
@@ -51,7 +60,7 @@ export const CropModal: React.FC<Props> = ({
     };
   }, [imageBlob, initialCorners]);
 
-  // Redraw canvas with quadrilateral and handles
+  // Redraw main canvas with quadrilateral, edge pills, and corner handles
   const renderCanvas = useCallback(() => {
     if (!canvasRef.current || !imgElement) return;
     const canvas = canvasRef.current;
@@ -72,45 +81,144 @@ export const CropModal: React.FC<Props> = ({
     ctx.lineTo(corners.bl.x, corners.bl.y);
     ctx.closePath();
 
-    ctx.fillStyle = 'rgba(0, 141, 218, 0.22)';
+    ctx.fillStyle = 'rgba(0, 141, 218, 0.25)';
     ctx.fill();
 
-    // Border lines
+    // High contrast dual-stroke border (dark shadow + bright cyan)
+    ctx.lineWidth = Math.max(5, Math.round(imgElement.width / 180));
+    ctx.strokeStyle = 'rgba(11, 25, 44, 0.6)';
+    ctx.stroke();
+
     ctx.lineWidth = Math.max(3, Math.round(imgElement.width / 240));
-    ctx.strokeStyle = '#008DDA';
+    ctx.strokeStyle = '#38BDF8';
     ctx.stroke();
     ctx.restore();
 
-    // 2. Corner handles
-    const handleRadius = Math.max(12, Math.round(imgElement.width / 45));
+    // 2. Mid-edge pill handles (allows moving entire edges)
+    const midTop = { x: (corners.tl.x + corners.tr.x) / 2, y: (corners.tl.y + corners.tr.y) / 2 };
+    const midBot = { x: (corners.bl.x + corners.br.x) / 2, y: (corners.bl.y + corners.br.y) / 2 };
+    const midLeft = { x: (corners.tl.x + corners.bl.x) / 2, y: (corners.tl.y + corners.bl.y) / 2 };
+    const midRight = { x: (corners.tr.x + corners.br.x) / 2, y: (corners.tr.y + corners.br.y) / 2 };
+
+    const edgePillRadius = Math.max(6, Math.round(imgElement.width / 80));
+    [midTop, midBot, midLeft, midRight].forEach((pt) => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, edgePillRadius, 0, Math.PI * 2);
+      ctx.fillStyle = '#008DDA';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    // 3. Corner handles
+    const handleRadius = Math.max(14, Math.round(imgElement.width / 40));
 
     cornerKeys.forEach((key) => {
       const pt = corners[key];
-      const isActive = activeCorner === key;
+      const isCornerActive = dragTarget?.type === 'corner' && dragTarget.key === key;
 
       ctx.save();
+      // Outer glow/shadow
       ctx.beginPath();
-      ctx.arc(pt.x, pt.y, handleRadius * (isActive ? 1.25 : 1), 0, Math.PI * 2);
-      ctx.fillStyle = isActive ? '#38BDF8' : '#FFFFFF';
+      ctx.arc(pt.x, pt.y, handleRadius * (isCornerActive ? 1.3 : 1.05), 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(11, 25, 44, 0.5)';
       ctx.fill();
-      ctx.lineWidth = Math.max(3, Math.round(imgElement.width / 260));
+
+      // Main handle circle
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, handleRadius * (isCornerActive ? 1.2 : 0.95), 0, Math.PI * 2);
+      ctx.fillStyle = isCornerActive ? '#38BDF8' : '#FFFFFF';
+      ctx.fill();
+      ctx.lineWidth = Math.max(3, Math.round(imgElement.width / 220));
       ctx.strokeStyle = '#008DDA';
       ctx.stroke();
 
-      // Inner dot
+      // Center dot
       ctx.beginPath();
       ctx.arc(pt.x, pt.y, handleRadius * 0.35, 0, Math.PI * 2);
       ctx.fillStyle = '#0B192C';
       ctx.fill();
       ctx.restore();
     });
-  }, [imgElement, corners, activeCorner]);
+  }, [imgElement, corners, dragTarget]);
 
   useEffect(() => {
     renderCanvas();
   }, [renderCanvas]);
 
-  // Unified pointer / touch coordinates mapping
+  // Update floating canvas magnifying loupe
+  useEffect(() => {
+    if (!loupeCanvasRef.current || !imgElement || !dragTarget) return;
+
+    let targetX = 0;
+    let targetY = 0;
+
+    if (dragTarget.type === 'corner') {
+      targetX = corners[dragTarget.key].x;
+      targetY = corners[dragTarget.key].y;
+    } else if (dragTarget.type === 'edge') {
+      if (dragTarget.key === 'top') {
+        targetX = (corners.tl.x + corners.tr.x) / 2;
+        targetY = (corners.tl.y + corners.tr.y) / 2;
+      } else if (dragTarget.key === 'bottom') {
+        targetX = (corners.bl.x + corners.br.x) / 2;
+        targetY = (corners.bl.y + corners.br.y) / 2;
+      } else if (dragTarget.key === 'left') {
+        targetX = (corners.tl.x + corners.bl.x) / 2;
+        targetY = (corners.tl.y + corners.bl.y) / 2;
+      } else if (dragTarget.key === 'right') {
+        targetX = (corners.tr.x + corners.br.x) / 2;
+        targetY = (corners.tr.y + corners.br.y) / 2;
+      }
+    }
+
+    const loupe = loupeCanvasRef.current;
+    const lCtx = loupe.getContext('2d');
+    if (!lCtx) return;
+
+    const lw = loupe.width;
+    const lh = loupe.height;
+    lCtx.clearRect(0, 0, lw, lh);
+
+    // Zoom factor 2.5x
+    const zoom = 2.5;
+    const srcBoxW = lw / zoom;
+    const srcBoxH = lh / zoom;
+    const sx = targetX - srcBoxW / 2;
+    const sy = targetY - srcBoxH / 2;
+
+    lCtx.save();
+    // Clip to circle
+    lCtx.beginPath();
+    lCtx.arc(lw / 2, lh / 2, lw / 2 - 2, 0, Math.PI * 2);
+    lCtx.clip();
+
+    // Draw magnified image slice
+    lCtx.drawImage(imgElement, sx, sy, srcBoxW, srcBoxH, 0, 0, lw, lh);
+
+    // Crosshairs
+    lCtx.lineWidth = 1.5;
+    lCtx.strokeStyle = 'rgba(56, 189, 248, 0.85)';
+    lCtx.beginPath();
+    lCtx.moveTo(0, lh / 2);
+    lCtx.lineTo(lw, lh / 2);
+    lCtx.moveTo(lw / 2, 0);
+    lCtx.lineTo(lw / 2, lh);
+    lCtx.stroke();
+
+    // Center target ring
+    lCtx.beginPath();
+    lCtx.arc(lw / 2, lh / 2, 8, 0, Math.PI * 2);
+    lCtx.lineWidth = 2;
+    lCtx.strokeStyle = '#FFFFFF';
+    lCtx.stroke();
+    lCtx.restore();
+  }, [imgElement, corners, dragTarget, touchScreenPos]);
+
+  // Coordinate conversion from screen viewport to full image resolution
   const getCanvasCoords = (clientX: number, clientY: number): Point | null => {
     if (!canvasRef.current || !imgElement) return null;
     const rect = canvasRef.current.getBoundingClientRect();
@@ -126,47 +234,134 @@ export const CropModal: React.FC<Props> = ({
     const pt = getCanvasCoords(clientX, clientY);
     if (!pt || !imgElement) return;
 
+    setDragStartPoint(pt);
+    setInitialDragCorners({ ...corners });
+
+    // 1. Check corner hits first (highest priority)
     const cornerKeys: (keyof DocumentCorners)[] = ['tl', 'tr', 'br', 'bl'];
-    // Hit radius
-    const hitRadius = Math.max(50, imgElement.width / 12);
-    let closestKey: keyof DocumentCorners | null = null;
-    let minDistance = Infinity;
+    const cornerHitRadius = Math.max(55, imgElement.width / 11);
+    let closestCorner: keyof DocumentCorners | null = null;
+    let minCornerDist = Infinity;
 
     cornerKeys.forEach((key) => {
       const dist = Math.hypot(corners[key].x - pt.x, corners[key].y - pt.y);
-      if (dist < hitRadius && dist < minDistance) {
-        minDistance = dist;
-        closestKey = key;
+      if (dist < cornerHitRadius && dist < minCornerDist) {
+        minCornerDist = dist;
+        closestCorner = key;
       }
     });
 
-    if (closestKey) {
-      setActiveCorner(closestKey);
-      setTouchPos({ x: clientX, y: clientY });
+    if (closestCorner) {
+      setDragTarget({ type: 'corner', key: closestCorner });
+      setTouchScreenPos({ x: clientX, y: clientY });
+      return;
+    }
+
+    // 2. Check edge midpoint hits
+    const edgeHitRadius = Math.max(50, imgElement.width / 14);
+    const midTop = { x: (corners.tl.x + corners.tr.x) / 2, y: (corners.tl.y + corners.tr.y) / 2 };
+    const midBot = { x: (corners.bl.x + corners.br.x) / 2, y: (corners.bl.y + corners.br.y) / 2 };
+    const midLeft = { x: (corners.tl.x + corners.bl.x) / 2, y: (corners.tl.y + corners.bl.y) / 2 };
+    const midRight = { x: (corners.tr.x + corners.br.x) / 2, y: (corners.tr.y + corners.br.y) / 2 };
+
+    const distTop = Math.hypot(midTop.x - pt.x, midTop.y - pt.y);
+    const distBot = Math.hypot(midBot.x - pt.x, midBot.y - pt.y);
+    const distLeft = Math.hypot(midLeft.x - pt.x, midLeft.y - pt.y);
+    const distRight = Math.hypot(midRight.x - pt.x, midRight.y - pt.y);
+
+    const minDist = Math.min(distTop, distBot, distLeft, distRight);
+    if (minDist < edgeHitRadius) {
+      if (minDist === distTop) setDragTarget({ type: 'edge', key: 'top' });
+      else if (minDist === distBot) setDragTarget({ type: 'edge', key: 'bottom' });
+      else if (minDist === distLeft) setDragTarget({ type: 'edge', key: 'left' });
+      else setDragTarget({ type: 'edge', key: 'right' });
+      setTouchScreenPos({ x: clientX, y: clientY });
     }
   };
 
   const handlePointerMove = (clientX: number, clientY: number) => {
-    if (!activeCorner || !imgElement) return;
+    if (!dragTarget || !imgElement || !dragStartPoint || !initialDragCorners) return;
     const pt = getCanvasCoords(clientX, clientY);
     if (!pt) return;
 
-    setTouchPos({ x: clientX, y: clientY });
-    setCorners((prev) => ({
-      ...prev,
-      [activeCorner]: {
-        x: Math.round(pt.x),
-        y: Math.round(pt.y),
-      },
-    }));
+    setTouchScreenPos({ x: clientX, y: clientY });
+    const deltaX = pt.x - dragStartPoint.x;
+    const deltaY = pt.y - dragStartPoint.y;
+
+    if (dragTarget.type === 'corner') {
+      setCorners((prev) => ({
+        ...prev,
+        [dragTarget.key]: {
+          x: Math.round(pt.x),
+          y: Math.round(pt.y),
+        },
+      }));
+    } else if (dragTarget.type === 'edge') {
+      const edge = dragTarget.key;
+      if (edge === 'top') {
+        const newY_tl = Math.max(0, Math.min(initialDragCorners.bl.y - 40, initialDragCorners.tl.y + deltaY));
+        const newY_tr = Math.max(0, Math.min(initialDragCorners.br.y - 40, initialDragCorners.tr.y + deltaY));
+        setCorners((prev) => ({
+          ...prev,
+          tl: { ...prev.tl, y: Math.round(newY_tl) },
+          tr: { ...prev.tr, y: Math.round(newY_tr) },
+        }));
+      } else if (edge === 'bottom') {
+        const newY_bl = Math.max(initialDragCorners.tl.y + 40, Math.min(imgElement.height, initialDragCorners.bl.y + deltaY));
+        const newY_br = Math.max(initialDragCorners.tr.y + 40, Math.min(imgElement.height, initialDragCorners.br.y + deltaY));
+        setCorners((prev) => ({
+          ...prev,
+          bl: { ...prev.bl, y: Math.round(newY_bl) },
+          br: { ...prev.br, y: Math.round(newY_br) },
+        }));
+      } else if (edge === 'left') {
+        const newX_tl = Math.max(0, Math.min(initialDragCorners.tr.x - 40, initialDragCorners.tl.x + deltaX));
+        const newX_bl = Math.max(0, Math.min(initialDragCorners.br.x - 40, initialDragCorners.bl.x + deltaX));
+        setCorners((prev) => ({
+          ...prev,
+          tl: { ...prev.tl, x: Math.round(newX_tl) },
+          bl: { ...prev.bl, x: Math.round(newX_bl) },
+        }));
+      } else if (edge === 'right') {
+        const newX_tr = Math.max(initialDragCorners.tl.x + 40, Math.min(imgElement.width, initialDragCorners.tr.x + deltaX));
+        const newX_br = Math.max(initialDragCorners.bl.x + 40, Math.min(imgElement.width, initialDragCorners.br.x + deltaX));
+        setCorners((prev) => ({
+          ...prev,
+          tr: { ...prev.tr, x: Math.round(newX_tr) },
+          br: { ...prev.br, x: Math.round(newX_br) },
+        }));
+      }
+    }
   };
 
   const handlePointerUp = () => {
-    setActiveCorner(null);
-    setTouchPos(null);
+    setDragTarget(null);
+    setDragStartPoint(null);
+    setInitialDragCorners(null);
+    setTouchScreenPos(null);
   };
 
-  // Quick Action: Reset to Full Canvas
+  // Quick Action 1: Auto-Detect with real Computer Vision
+  const handleAutoDetect = () => {
+    if (!imgElement) return;
+    const detected = detectDocumentCorners(imgElement);
+    setCorners(detected);
+  };
+
+  // Quick Action 2: Tight Frame (14% x, 12% y)
+  const handleTightFit = () => {
+    if (!imgElement) return;
+    const w = imgElement.width;
+    const h = imgElement.height;
+    setCorners({
+      tl: { x: Math.round(w * 0.14), y: Math.round(h * 0.12) },
+      tr: { x: Math.round(w * 0.86), y: Math.round(h * 0.12) },
+      br: { x: Math.round(w * 0.86), y: Math.round(h * 0.88) },
+      bl: { x: Math.round(w * 0.14), y: Math.round(h * 0.88) },
+    });
+  };
+
+  // Quick Action 3: Full Bounds
   const handleFullImage = () => {
     if (!imgElement) return;
     setCorners({
@@ -177,14 +372,7 @@ export const CropModal: React.FC<Props> = ({
     });
   };
 
-  // Quick Action: Auto-Detect
-  const handleAutoDetect = () => {
-    if (!imgElement) return;
-    const detected = detectDocumentCorners(imgElement.width, imgElement.height);
-    setCorners(detected);
-  };
-
-  // Quick Action: Rotate Image
+  // Quick Action 4: Rotate Image 90°
   const handleRotateImage = () => {
     if (!imgElement) return;
     const canvas = document.createElement('canvas');
@@ -199,12 +387,13 @@ export const CropModal: React.FC<Props> = ({
 
     canvas.toBlob((blob) => {
       if (blob) {
+        setCurrentOriginalBlob(blob);
         const url = URL.createObjectURL(blob);
         const newImg = new Image();
         newImg.src = url;
         newImg.onload = () => {
           setImgElement(newImg);
-          // Rotate corner coordinates as well
+          // Rotate corner coordinates accurately
           setCorners({
             tl: { x: newImg.width - corners.bl.y, y: corners.bl.x },
             tr: { x: newImg.width - corners.tl.y, y: corners.tl.x },
@@ -224,7 +413,7 @@ export const CropModal: React.FC<Props> = ({
       warpedCanvas.toBlob(
         (blob) => {
           if (blob) {
-            onDone(blob, corners);
+            onDone(blob, corners, currentOriginalBlob);
           }
           setIsProcessing(false);
         },
@@ -240,10 +429,10 @@ export const CropModal: React.FC<Props> = ({
   return (
     <div className="fixed inset-0 z-50 bg-[#0B192C] flex flex-col justify-between select-none">
       {/* Top Header */}
-      <div className="flex items-center justify-between p-4 bg-[#1E3E62] border-b border-slate-700/80 safe-area-top text-white">
+      <div className="flex items-center justify-between p-3.5 bg-[#1E3E62] border-b border-slate-700/80 safe-area-top text-white">
         <button
           onClick={onCancel}
-          className="p-2 rounded-lg hover:bg-slate-700/60 active:scale-95 text-slate-300"
+          className="p-2 rounded-xl hover:bg-slate-700/60 active:scale-95 text-slate-300"
           aria-label="Batal"
         >
           <X className="w-5 h-5" />
@@ -251,19 +440,19 @@ export const CropModal: React.FC<Props> = ({
 
         <div className="text-center">
           <h3 className="font-semibold text-sm">Sesuaikan Sudut Dokumen</h3>
-          <p className="text-[11px] text-slate-300">Geser 4 titik ke sudut dokumen</p>
+          <p className="text-[11px] text-cyan-300">Geser 4 titik sudut atau tepi garis</p>
         </div>
 
         <button
           onClick={handleRotateImage}
-          className="p-2 rounded-lg hover:bg-slate-700/60 active:scale-95 text-blue-300"
+          className="p-2 rounded-xl hover:bg-slate-700/60 active:scale-95 text-cyan-300"
           title="Putar 90°"
         >
           <RotateCw className="w-5 h-5" />
         </button>
       </div>
 
-      {/* Main Interactive Canvas Area */}
+      {/* Main Interactive Canvas Viewport */}
       <div
         ref={containerRef}
         className="relative flex-1 flex items-center justify-center p-3 bg-black/60 overflow-hidden touch-none"
@@ -287,64 +476,67 @@ export const CropModal: React.FC<Props> = ({
             ref={canvasRef}
             width={imgElement.width}
             height={imgElement.height}
-            className="max-w-full max-h-[68vh] object-contain shadow-2xl rounded-sm border border-slate-700"
+            className="max-w-full max-h-[66vh] object-contain shadow-2xl rounded-sm border border-slate-700"
           />
         )}
 
-        {/* Floating Magnifying Loupe on Touch */}
-        {activeCorner && touchPos && imgElement && (
+        {/* Real Canvas Magnifying Loupe on Touch */}
+        {dragTarget && touchScreenPos && (
           <div
-            className="pointer-events-none fixed z-50 w-28 h-28 rounded-full border-3 border-blue-400 bg-slate-900 shadow-2xl overflow-hidden -translate-x-1/2 -translate-y-full"
+            className="pointer-events-none fixed z-50 w-32 h-32 rounded-full border-3 border-cyan-400 bg-slate-950 shadow-2xl overflow-hidden -translate-x-1/2 -translate-y-full"
             style={{
-              left: `${touchPos.x}px`,
-              top: `${Math.max(80, touchPos.y - 40)}px`,
+              left: `${touchScreenPos.x}px`,
+              top: `${Math.max(90, touchScreenPos.y - 35)}px`,
             }}
           >
-            {/* Magnifier Canvas Preview */}
-            <div
-              className="w-full h-full"
-              style={{
-                backgroundImage: `url(${imgElement.src})`,
-                backgroundSize: `${(imgElement.width / (imgElement.width / 3)) * 100}%`,
-                backgroundPosition: `${(corners[activeCorner].x / imgElement.width) * 100}% ${(corners[activeCorner].y / imgElement.height) * 100}%`,
-              }}
+            <canvas
+              ref={loupeCanvasRef}
+              width={128}
+              height={128}
+              className="w-full h-full block"
             />
-            {/* Crosshair */}
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="w-full h-0.5 bg-cyan-400/70" />
-              <div className="absolute h-full w-0.5 bg-cyan-400/70" />
-              <div className="w-3 h-3 rounded-full border-2 border-white" />
-            </div>
           </div>
         )}
       </div>
 
       {/* Bottom Tool Bar & Actions */}
-      <div className="bg-[#1E3E62] border-t border-slate-700 p-4 safe-area-bottom flex flex-col gap-3">
-        {/* Quick presets */}
-        <div className="flex items-center justify-center gap-4 text-xs">
+      <div className="bg-[#1E3E62] border-t border-slate-700 p-3.5 safe-area-bottom flex flex-col gap-3">
+        {/* Quick presets row */}
+        <div className="grid grid-cols-4 gap-2 text-xs">
           <button
             onClick={handleAutoDetect}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-blue-300 border border-blue-500/30 active:scale-95 transition-transform"
+            className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-xl bg-blue-600/30 hover:bg-blue-600/50 text-cyan-300 border border-cyan-400/30 active:scale-95 transition-transform"
+            title="Deteksi tepi dokumen otomatis"
           >
-            <Wand2 className="w-4 h-4" />
-            <span>Otomatis</span>
+            <Wand2 className="w-3.5 h-3.5" />
+            <span className="font-semibold text-[11px]">Otomatis</span>
+          </button>
+
+          <button
+            onClick={handleTightFit}
+            className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 active:scale-95 transition-transform"
+            title="Presisi bingkai dokumen standar"
+          >
+            <Move className="w-3.5 h-3.5 text-blue-400" />
+            <span className="text-[11px]">Ketat</span>
           </button>
 
           <button
             onClick={handleFullImage}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 active:scale-95 transition-transform"
+            className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 active:scale-95 transition-transform"
+            title="Pilih seluruh gambar"
           >
-            <Maximize2 className="w-4 h-4" />
-            <span>Penuh</span>
+            <Maximize2 className="w-3.5 h-3.5 text-slate-400" />
+            <span className="text-[11px]">Penuh</span>
           </button>
 
           <button
             onClick={handleAutoDetect}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 active:scale-95 transition-transform"
+            className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 border border-slate-700 active:scale-95 transition-transform"
+            title="Reset ke hasil deteksi"
           >
-            <RotateCcw className="w-4 h-4" />
-            <span>Reset</span>
+            <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+            <span className="text-[11px]">Reset</span>
           </button>
         </div>
 

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { DocumentRecord, PageItem, FilterType } from '../types';
+import { DocumentRecord, PageItem, FilterType, DocumentCorners } from '../types';
 import { applyDocumentFilters } from '../services/imageFilters';
 import { warpPerspective } from '../services/perspective';
 import { generatePdfBlob, shareOrDownloadFile } from '../services/pdfService';
@@ -22,7 +22,6 @@ import {
   Check,
   X,
   Camera,
-  ArrowLeftRight,
 } from 'lucide-react';
 
 interface Props {
@@ -50,6 +49,16 @@ export const DocumentEditor: React.FC<Props> = ({
   const [exportStatus, setExportStatus] = useState<string | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const transformTokenRef = useRef(0);
+
+  // Synchronize internal state when parent initialDoc updates (e.g. after adding new pages)
+  useEffect(() => {
+    setDoc(initialDoc);
+    setExportFileName(initialDoc.title);
+    if (initialDoc.pages.length > doc.pages.length) {
+      setCurrentPageIndex(initialDoc.pages.length - 1);
+    }
+  }, [initialDoc]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const currentPage: PageItem | undefined = doc.pages[currentPageIndex];
 
@@ -72,53 +81,66 @@ export const DocumentEditor: React.FC<Props> = ({
   ) => {
     if (!currentPage) return;
 
+    const currentToken = ++transformTokenRef.current;
+
     const filter = newFilter !== undefined ? newFilter : currentPage.filter;
     const rotation = ((currentPage.rotation + rotDelta) % 360 + 360) % 360;
     const brightness = newBrightness !== undefined ? newBrightness : currentPage.brightness;
     const contrast = newContrast !== undefined ? newContrast : currentPage.contrast;
 
-    // Load original blob to re-warp and filter cleanly without generation loss
+    // Load original blob to re-warp and filter cleanly without generational quality loss
     const origUrl = URL.createObjectURL(currentPage.originalBlob);
     const origImg = new Image();
     origImg.src = origUrl;
-    await new Promise((resolve) => {
-      origImg.onload = resolve;
-    });
 
-    // 1. Warp perspective
-    const warpedCanvas = await warpPerspective(origImg, currentPage.corners);
-    URL.revokeObjectURL(origUrl);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        origImg.onload = () => resolve();
+        origImg.onerror = () => reject(new Error('Gagal memuat gambar asli'));
+      });
 
-    // 2. Apply filters + rotation + sliders
-    const finalCanvas = applyDocumentFilters(warpedCanvas, filter, brightness, contrast, rotation);
+      // 1. Warp perspective from original corners
+      const warpedCanvas = await warpPerspective(origImg, currentPage.corners);
+      URL.revokeObjectURL(origUrl);
 
-    finalCanvas.toBlob(
-      async (blob) => {
-        if (!blob) return;
-        const updatedPages = [...doc.pages];
-        updatedPages[currentPageIndex] = {
-          ...currentPage,
-          processedBlob: blob,
-          filter,
-          rotation,
-          brightness,
-          contrast,
-          width: finalCanvas.width,
-          height: finalCanvas.height,
-        };
+      // Check if another transformation started while processing
+      if (currentToken !== transformTokenRef.current) return;
 
-        const updatedDoc = {
-          ...doc,
-          pages: updatedPages,
-          updatedAt: Date.now(),
-        };
+      // 2. Apply filters + rotation + sliders
+      const finalCanvas = applyDocumentFilters(warpedCanvas, filter, brightness, contrast, rotation);
 
-        setDoc(updatedDoc);
-        await saveDocument(updatedDoc);
-      },
-      'image/jpeg',
-      0.93
-    );
+      finalCanvas.toBlob(
+        async (blob) => {
+          if (!blob || currentToken !== transformTokenRef.current) return;
+
+          const updatedPages = [...doc.pages];
+          updatedPages[currentPageIndex] = {
+            ...currentPage,
+            processedBlob: blob,
+            filter,
+            rotation,
+            brightness,
+            contrast,
+            width: finalCanvas.width,
+            height: finalCanvas.height,
+          };
+
+          const updatedDoc = {
+            ...doc,
+            pages: updatedPages,
+            updatedAt: Date.now(),
+          };
+
+          setDoc(updatedDoc);
+          await saveDocument(updatedDoc);
+        },
+        'image/jpeg',
+        0.93
+      );
+    } catch (e) {
+      URL.revokeObjectURL(origUrl);
+      console.error(e);
+    }
   };
 
   const handleTitleChange = async (newTitle: string) => {
@@ -193,7 +215,11 @@ export const DocumentEditor: React.FC<Props> = ({
     }
   };
 
-  const handleRecropDone = async (warpedBlob: Blob, newCorners: any) => {
+  const handleRecropDone = async (
+    warpedBlob: Blob,
+    newCorners: DocumentCorners,
+    updatedOriginalBlob?: Blob
+  ) => {
     if (!currentPage) return;
     setIsCropOpen(false);
 
@@ -201,67 +227,75 @@ export const DocumentEditor: React.FC<Props> = ({
     const imgUrl = URL.createObjectURL(warpedBlob);
     const img = new Image();
     img.src = imgUrl;
-    await new Promise((res) => {
-      img.onload = res;
-    });
 
-    const finalCanvas = applyDocumentFilters(
-      img,
-      currentPage.filter,
-      currentPage.brightness,
-      currentPage.contrast,
-      currentPage.rotation
-    );
-    URL.revokeObjectURL(imgUrl);
+    try {
+      await new Promise<void>((res, rej) => {
+        img.onload = () => res();
+        img.onerror = () => rej(new Error('Gagal memuat gambar hasil potong'));
+      });
 
-    finalCanvas.toBlob(
-      async (blob) => {
-        if (!blob) return;
-        const updatedPages = [...doc.pages];
-        updatedPages[currentPageIndex] = {
-          ...currentPage,
-          processedBlob: blob,
-          corners: newCorners,
-          width: finalCanvas.width,
-          height: finalCanvas.height,
-        };
+      const finalCanvas = applyDocumentFilters(
+        img,
+        currentPage.filter,
+        currentPage.brightness,
+        currentPage.contrast,
+        currentPage.rotation
+      );
+      URL.revokeObjectURL(imgUrl);
 
-        const updatedDoc = { ...doc, pages: updatedPages, updatedAt: Date.now() };
-        setDoc(updatedDoc);
-        await saveDocument(updatedDoc);
-      },
-      'image/jpeg',
-      0.93
-    );
+      finalCanvas.toBlob(
+        async (blob) => {
+          if (!blob) return;
+          const updatedPages = [...doc.pages];
+          updatedPages[currentPageIndex] = {
+            ...currentPage,
+            originalBlob: updatedOriginalBlob || currentPage.originalBlob,
+            processedBlob: blob,
+            corners: newCorners,
+            width: finalCanvas.width,
+            height: finalCanvas.height,
+          };
+
+          const updatedDoc = { ...doc, pages: updatedPages, updatedAt: Date.now() };
+          setDoc(updatedDoc);
+          await saveDocument(updatedDoc);
+        },
+        'image/jpeg',
+        0.93
+      );
+    } catch (e) {
+      URL.revokeObjectURL(imgUrl);
+      console.error(e);
+    }
   };
 
   return (
     <div className="fixed inset-0 z-40 bg-[#0B192C] flex flex-col text-slate-100 select-none overflow-hidden">
       {/* Top Header */}
-      <div className="p-3.5 bg-[#1E3E62] border-b border-slate-700/80 flex items-center justify-between safe-area-top shadow-md z-10">
+      <div className="p-3 bg-[#1E3E62] border-b border-slate-700/80 flex items-center justify-between safe-area-top shadow-md z-10">
         <button
           onClick={onBack}
           className="p-2 rounded-xl hover:bg-slate-700/60 text-slate-200 active:scale-95 transition-transform"
-          aria-label="Kembali ke Daftar Dokumen"
+          aria-label="Kembali ke Beranda"
         >
           <ArrowLeft className="w-5 h-5" />
         </button>
 
-        <div className="flex-1 mx-3 max-w-[200px] text-center">
+        <div className="flex-1 mx-2 max-w-[200px] text-center">
           <input
             type="text"
             value={doc.title}
             onChange={(e) => handleTitleChange(e.target.value)}
-            className="w-full bg-slate-900/60 border border-slate-700/80 rounded-lg px-2.5 py-1 text-xs font-semibold text-white text-center focus:outline-none focus:border-blue-400 focus:bg-slate-900 truncate"
+            className="w-full bg-slate-900/70 border border-slate-700 rounded-lg px-2.5 py-1 text-xs font-semibold text-white text-center focus:outline-none focus:border-cyan-400 focus:bg-slate-900 truncate"
             title="Klik untuk mengubah nama dokumen"
           />
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
           {/* OCR Trigger */}
           <button
             onClick={() => setIsOcrOpen(true)}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-blue-600/30 hover:bg-blue-600/40 text-blue-300 border border-blue-400/30 text-xs font-medium active:scale-95 transition-transform"
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-blue-600/30 hover:bg-blue-600/40 text-cyan-300 border border-cyan-400/30 text-xs font-medium active:scale-95 transition-transform"
             title="Ekstraksi teks dengan OCR"
           >
             <FileText className="w-4 h-4" />
@@ -274,7 +308,7 @@ export const DocumentEditor: React.FC<Props> = ({
               setExportFileName(doc.title);
               setIsExportModalOpen(true);
             }}
-            className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-transform"
+            className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md active:scale-95 transition-transform"
           >
             <Share2 className="w-4 h-4" />
             <span>Ekspor</span>
@@ -292,7 +326,7 @@ export const DocumentEditor: React.FC<Props> = ({
           />
         )}
 
-        {/* Page Nav Arrows */}
+        {/* Page Navigation Arrows */}
         {doc.pages.length > 1 && (
           <>
             <button
@@ -315,8 +349,8 @@ export const DocumentEditor: React.FC<Props> = ({
           </>
         )}
 
-        {/* Floating Page Badge */}
-        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-black/70 backdrop-blur-xs px-3.5 py-1 rounded-full text-xs font-medium text-slate-200 border border-white/10 shadow-lg">
+        {/* Floating Page Counter Badge */}
+        <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-black/75 backdrop-blur-xs px-3.5 py-1 rounded-full text-xs font-medium text-slate-200 border border-white/10 shadow-lg">
           Halaman {currentPageIndex + 1} dari {doc.pages.length}
         </div>
       </div>
@@ -330,9 +364,9 @@ export const DocumentEditor: React.FC<Props> = ({
             <div
               key={p.id}
               onClick={() => setCurrentPageIndex(idx)}
-              className={`relative shrink-0 w-12 h-16 rounded border-2 overflow-hidden cursor-pointer transition-transform ${
+              className={`relative shrink-0 w-12 h-16 rounded-lg border-2 overflow-hidden cursor-pointer transition-transform ${
                 isSelected
-                  ? 'border-blue-400 scale-105 shadow-md shadow-blue-500/30'
+                  ? 'border-cyan-400 scale-105 shadow-md shadow-cyan-500/30'
                   : 'border-slate-700 opacity-60 hover:opacity-100'
               }`}
             >
@@ -344,19 +378,19 @@ export const DocumentEditor: React.FC<Props> = ({
           );
         })}
 
-        {/* Add Page Buttons */}
+        {/* Add Page Buttons (Camera & Gallery) */}
         <button
           onClick={onScanNewPage}
-          className="shrink-0 w-12 h-16 border-2 border-dashed border-blue-400/60 rounded flex flex-col items-center justify-center text-blue-300 hover:bg-blue-600/10 active:scale-95 transition-all"
-          title="Scan halaman baru"
+          className="shrink-0 w-12 h-16 border-2 border-dashed border-cyan-400/60 rounded-lg flex flex-col items-center justify-center text-cyan-300 hover:bg-blue-600/10 active:scale-95 transition-all"
+          title="Scan halaman baru dengan kamera"
         >
           <Camera className="w-4 h-4 mb-0.5" />
           <span className="text-[9px] font-medium">+Scan</span>
         </button>
 
         <label
-          className="shrink-0 w-12 h-16 border-2 border-dashed border-slate-600 rounded flex flex-col items-center justify-center text-slate-400 hover:bg-slate-700/30 active:scale-95 transition-all cursor-pointer"
-          title="Impor halaman dari galeri"
+          className="shrink-0 w-12 h-16 border-2 border-dashed border-slate-600 rounded-lg flex flex-col items-center justify-center text-slate-400 hover:bg-slate-700/30 active:scale-95 transition-all cursor-pointer"
+          title="Impor halaman dari galeri foto"
         >
           <ImageIcon className="w-4 h-4 mb-0.5" />
           <span className="text-[9px] font-medium">+Foto</span>
@@ -381,7 +415,7 @@ export const DocumentEditor: React.FC<Props> = ({
             onClick={() => setActiveTab('filters')}
             className={`font-semibold pb-1 transition-colors border-b-2 ${
               activeTab === 'filters'
-                ? 'text-blue-400 border-blue-400'
+                ? 'text-cyan-400 border-cyan-400'
                 : 'text-slate-400 border-transparent hover:text-slate-200'
             }`}
           >
@@ -391,7 +425,7 @@ export const DocumentEditor: React.FC<Props> = ({
             onClick={() => setActiveTab('adjust')}
             className={`font-semibold pb-1 transition-colors border-b-2 flex items-center gap-1 ${
               activeTab === 'adjust'
-                ? 'text-blue-400 border-blue-400'
+                ? 'text-cyan-400 border-cyan-400'
                 : 'text-slate-400 border-transparent hover:text-slate-200'
             }`}
           >
@@ -432,7 +466,7 @@ export const DocumentEditor: React.FC<Props> = ({
               <span className="text-slate-300">Kecerahan: {currentPage?.brightness || 0}</span>
               <button
                 onClick={() => updatePageTransformations(undefined, 0, 0, 0)}
-                className="text-[10px] text-blue-400 hover:underline"
+                className="text-[10px] text-cyan-400 hover:underline"
               >
                 Reset Slider
               </button>
@@ -445,7 +479,7 @@ export const DocumentEditor: React.FC<Props> = ({
               onChange={(e) =>
                 updatePageTransformations(undefined, 0, Number(e.target.value), undefined)
               }
-              className="w-full accent-blue-500 cursor-pointer"
+              className="w-full accent-cyan-400 cursor-pointer"
             />
 
             <div className="flex items-center justify-between pt-1">
@@ -459,7 +493,7 @@ export const DocumentEditor: React.FC<Props> = ({
               onChange={(e) =>
                 updatePageTransformations(undefined, 0, undefined, Number(e.target.value))
               }
-              className="w-full accent-blue-500 cursor-pointer"
+              className="w-full accent-cyan-400 cursor-pointer"
             />
           </div>
         )}
@@ -470,7 +504,7 @@ export const DocumentEditor: React.FC<Props> = ({
             onClick={() => updatePageTransformations(undefined, 90)}
             className="flex flex-col items-center hover:text-white active:scale-95 transition-transform"
           >
-            <RotateCw className="w-5 h-5 mb-1 text-blue-400" />
+            <RotateCw className="w-5 h-5 mb-1 text-cyan-400" />
             <span>Putar 90°</span>
           </button>
 
@@ -535,7 +569,7 @@ export const DocumentEditor: React.FC<Props> = ({
                   type="text"
                   value={exportFileName}
                   onChange={(e) => setExportFileName(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-400"
+                  className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-400"
                 />
               </div>
 
@@ -546,7 +580,7 @@ export const DocumentEditor: React.FC<Props> = ({
                     onClick={() => setExportFormat('a4')}
                     className={`py-2 px-3 rounded-xl border text-center transition-colors ${
                       exportFormat === 'a4'
-                        ? 'border-blue-500 bg-blue-600/30 text-white font-semibold'
+                        ? 'border-cyan-400 bg-blue-600/30 text-white font-semibold'
                         : 'border-slate-700 bg-slate-900 text-slate-300'
                     }`}
                   >
@@ -556,7 +590,7 @@ export const DocumentEditor: React.FC<Props> = ({
                     onClick={() => setExportFormat('fit')}
                     className={`py-2 px-3 rounded-xl border text-center transition-colors ${
                       exportFormat === 'fit'
-                        ? 'border-blue-500 bg-blue-600/30 text-white font-semibold'
+                        ? 'border-cyan-400 bg-blue-600/30 text-white font-semibold'
                         : 'border-slate-700 bg-slate-900 text-slate-300'
                     }`}
                   >
@@ -566,7 +600,7 @@ export const DocumentEditor: React.FC<Props> = ({
               </div>
 
               {exportStatus && (
-                <div className="p-3 bg-blue-900/40 border border-blue-500/30 rounded-xl text-center text-blue-200">
+                <div className="p-3 bg-blue-900/40 border border-cyan-400/30 rounded-xl text-center text-cyan-200">
                   {exportStatus}
                 </div>
               )}

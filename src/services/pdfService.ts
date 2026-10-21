@@ -22,9 +22,21 @@ export async function generatePdfBlob(
     const arrayBuffer = await page.processedBlob.arrayBuffer();
     const isPng = page.processedBlob.type === 'image/png';
 
-    const embeddedImage = isPng
-      ? await pdfDoc.embedPng(arrayBuffer)
-      : await pdfDoc.embedJpg(arrayBuffer);
+    let embeddedImage;
+    try {
+      if (isPng) {
+        embeddedImage = await pdfDoc.embedPng(arrayBuffer);
+      } else {
+        embeddedImage = await pdfDoc.embedJpg(arrayBuffer);
+      }
+    } catch {
+      // Safe fallback: try alternate format
+      try {
+        embeddedImage = await pdfDoc.embedPng(arrayBuffer);
+      } catch {
+        embeddedImage = await pdfDoc.embedJpg(arrayBuffer);
+      }
+    }
 
     const imgWidth = embeddedImage.width;
     const imgHeight = embeddedImage.height;
@@ -70,7 +82,6 @@ export async function generatePdfBlob(
   }
 
   const pdfBytes = await pdfDoc.save();
-  // Cast Uint8Array buffer or slice to ArrayBuffer for standard Blob compatibility
   return new Blob([new Uint8Array(pdfBytes)], { type: 'application/pdf' });
 }
 

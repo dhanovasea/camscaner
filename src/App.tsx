@@ -76,13 +76,18 @@ export default function App() {
   };
 
   // When crop / perspective adjustment is confirmed in CropModal
-  const handleCropComplete = async (warpedBlob: Blob, corners: DocumentCorners) => {
+  const handleCropComplete = async (
+    warpedBlob: Blob,
+    corners: DocumentCorners,
+    updatedOriginalBlob?: Blob
+  ) => {
     // Apply default "magic" enhancement filter to newly captured page
     const imgUrl = URL.createObjectURL(warpedBlob);
     const img = new Image();
     img.src = imgUrl;
-    await new Promise((resolve) => {
-      img.onload = resolve;
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Gagal memproses gambar'));
     });
 
     const enhancedCanvas = applyDocumentFilters(img, 'magic', 0, 0, 0);
@@ -92,9 +97,11 @@ export default function App() {
       async (processedBlob) => {
         if (!processedBlob) return;
 
+        const effectiveOriginal = updatedOriginalBlob || pendingCropBlob!;
+
         const newPage: PageItem = {
           id: crypto.randomUUID(),
-          originalBlob: pendingCropBlob!,
+          originalBlob: effectiveOriginal,
           processedBlob,
           corners,
           rotation: 0,
